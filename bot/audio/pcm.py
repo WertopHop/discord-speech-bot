@@ -9,6 +9,7 @@ is synthesized without pauses between sentences.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import shutil
 import wave
@@ -113,7 +114,9 @@ class FFmpegPCMDecoder:
         proc = self._proc
         if proc is not None and proc.stdin is not None and not proc.stdin.is_closing():
             try:
-                await proc.stdin.write_eof()
+                result = proc.stdin.write_eof()  # sync or async depending on Python
+                if inspect.isawaitable(result):
+                    await result
             except (BrokenPipeError, ConnectionResetError):
                 pass
 

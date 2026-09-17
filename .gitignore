@@ -17,3 +17,6 @@ venv/
 .idea/
 *.log
 *.err
+
+# Local-only checks (not part of the pipeline)
+tests/

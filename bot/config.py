@@ -62,7 +62,6 @@ class Settings:
     tts_format: str
     tts_sample_rate: int
 
-    llm_system_prompt: str
     llm_max_tokens: int
     llm_temperature: float
     history_limit: int
@@ -76,17 +75,20 @@ class Settings:
     barge_in: bool
     barge_in_min_ms: int
 
-    command_prefix: str
     request_timeout: float
 
 
 def get_settings() -> Settings:
     """Reads .env and validates. Raises ConfigError with a clear message."""
-    missing = [
-        name
-        for name in ("DISCORD_TOKEN", "OPENROUTER_API_KEY")
-        if not (os.getenv(name) or "").strip()
-    ]
+    required = (
+        "DISCORD_TOKEN",
+        "OPENROUTER_API_KEY",
+        "STT_MODEL",
+        "LLM_MODEL",
+        "TTS_MODEL",
+        "TTS_VOICE",
+    )
+    missing = [name for name in required if not (os.getenv(name) or "").strip()]
     if missing:
         raise ConfigError(
             "Required environment variables are not set: "
@@ -101,15 +103,14 @@ def get_settings() -> Settings:
         openrouter_base_url=_str(
             "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
         ).rstrip("/"),
-        # Models
-        stt_model=_str("STT_MODEL", "openai/whisper-large-v3-turbo"),
-        llm_model=_str("LLM_MODEL", "qwen/qwen3-30b-a3b-instruct-2507"),
-        tts_model=_str("TTS_MODEL", "x-ai/grok-voice-tts-1.0"),
-        tts_voice=_str("TTS_VOICE", "Eve"),
+        # Models (no built-in defaults: always taken from .env)
+        stt_model=_str("STT_MODEL", ""),
+        llm_model=_str("LLM_MODEL", ""),
+        tts_model=_str("TTS_MODEL", ""),
+        tts_voice=_str("TTS_VOICE", ""),
         tts_format=_str("TTS_FORMAT", "wav").lower(),
         tts_sample_rate=_int("TTS_SAMPLE_RATE", 24000),
         # LLM
-        llm_system_prompt=os.getenv("LLM_SYSTEM_PROMPT", "") or "",
         llm_max_tokens=_int("LLM_MAX_TOKENS", 512),
         llm_temperature=_float("LLM_TEMPERATURE", 0.7),
         history_limit=_int("HISTORY_LIMIT", 12),
@@ -123,7 +124,6 @@ def get_settings() -> Settings:
         barge_in=_bool("BARGE_IN", True),
         barge_in_min_ms=_int("BARGE_IN_MIN_MS", 350),
         # Other
-        command_prefix=_str("COMMAND_PREFIX", "!"),
         request_timeout=_float("REQUEST_TIMEOUT", 60.0),
     )
 

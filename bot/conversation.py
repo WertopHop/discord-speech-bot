@@ -15,9 +15,9 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
-def build_system_prompt(settings: Settings) -> str:
+def build_system_prompt() -> str:
     """TODO: place for system prompt calibration."""
-    return settings.llm_system_prompt or DEFAULT_SYSTEM_PROMPT
+    return DEFAULT_SYSTEM_PROMPT
 
 
 def preprocess_user_text(text: str) -> str:
@@ -42,7 +42,7 @@ class ConversationStore:
     ) -> list[dict[str, str]]:
         content = f"{display_name}: {preprocess_user_text(user_text)}"
         return [
-            {"role": "system", "content": build_system_prompt(self._s)},
+            {"role": "system", "content": build_system_prompt()},
             *self._history[key],
             {"role": "user", "content": content},
         ]

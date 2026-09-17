@@ -18,8 +18,7 @@ def main() -> None:
         sys.exit(1)
 
     bot = SpeechBot(settings)
-    # log_handler=None: keep our logging config
-    bot.run(settings.discord_token, log_handler=None)
+    bot.run(settings.discord_token)
 
 
 if __name__ == "__main__":

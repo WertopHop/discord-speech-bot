@@ -18,7 +18,7 @@ import discord
 from .audio.pcm import DECODE_CHUNK, FFmpegPCMDecoder, PipelinedAudioSource
 from .config import Settings
 from .conversation import ConversationStore
-from .openrouter import OpenRouterClient, OpenRouterError
+from .openrouter import OpenRouterClient
 
 log = logging.getLogger(__name__)
 

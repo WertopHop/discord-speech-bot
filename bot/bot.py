@@ -14,7 +14,7 @@ import discord
 from discord.ext import commands
 
 from .audio.capture import VoiceCaptureSink
-from .audio.pcm import get_ffmpeg_path
+from .audio.pcm import PipelinedAudioSource, get_ffmpeg_path
 from .config import Settings
 from .conversation import ConversationStore
 from .openrouter import OpenRouterClient
@@ -29,7 +29,7 @@ class SpeechBot(commands.Bot):
         intents.message_content = True
         intents.voice_states = True
         super().__init__(
-            command_prefix=commands.when_mentioned_or(settings.command_prefix),
+            command_prefix="!",
             intents=intents,
             help_command=None,
         )
@@ -73,8 +73,10 @@ class SpeechBot(commands.Bot):
         return on_utterance
 
     def _start_capture(self, vc: discord.VoiceClient) -> None:
-        if vc.guild.id in self._sinks or self.pipeline is None:
+        if self.pipeline is None:
             return
+        if vc.is_recording():
+            return  # already listening
         loop = asyncio.get_running_loop()
         s = self.settings
         interrupt_cb = (
