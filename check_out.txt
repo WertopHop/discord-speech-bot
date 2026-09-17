@@ -1,0 +1,6 @@
+discord.py: 2.8.1 | python: 3.13.7
+Traceback (most recent call last):
+  File "W:\CodeProg\Python\discord\discord-speech-bot\check_env.py", line 9, in <module>
+    from discord.voice_client import VoiceClient as V  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ModuleNotFoundError: No module named 'discord.voice_client'

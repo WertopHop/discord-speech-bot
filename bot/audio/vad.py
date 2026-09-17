@@ -33,6 +33,11 @@ class VoiceActivityDetector:
     def backend(self) -> str:
         return "webrtcvad" if self._vad is not None else "energy"
 
+    @property
+    def frame_samples(self) -> int:
+        """Samples per classification frame (20 ms at 16 kHz)."""
+        return FRAME_20MS
+
     def process(self, mono16k: np.ndarray) -> list[bool]:
         """Splits the input into 20ms frames and returns a list of 'speech?' for each."""
         count = len(mono16k) // FRAME_20MS

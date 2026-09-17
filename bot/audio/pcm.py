@@ -13,6 +13,7 @@ import io
 import shutil
 import wave
 
+import discord
 import numpy as np
 
 # Discord: 48 kHz, stereo, s16le; frame = 20 ms
@@ -41,9 +42,8 @@ def get_ffmpeg_path() -> str:
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(
-            "ffmpeg not found. Install it in the system or add the "
-            "imageio-ffmpeg package to requirements.txt (it downloads the binary automatically)."
-            "imageio-ffmpeg in requirements.txt (it downloads the binary automatically)."
+            "ffmpeg not found. Install it system-wide or add "
+            "imageio-ffmpeg to requirements.txt (it ships the binary automatically)."
         ) from exc
 
 
@@ -141,5 +141,54 @@ class FFmpegPCMDecoder:
             pass
 
 
-class PipelinedAudioSource(discord_PCMSource := object):  # placeholder, replaced below
-    pass
+class PipelinedAudioSource(discord.AudioSource):
+    """AudioSource that pulls decoded PCM from an asyncio queue.
+
+    discord.py/pycord AudioPlayer runs in a separate thread and calls read()
+    synchronously. This class bridges the player thread to async producers
+    (LLM -> TTS -> ffmpeg chain) via run_coroutine_threadsafe.
+
+    read() must return exactly FRAME_SIZE bytes (20 ms) or b"" to end playback.
+    """
+
+    READ_TIMEOUT = 30.0
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self._queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=64)
+        self._buf = bytearray()
+        self._eof = False
+        self._stopped = False
+
+    async def push(self, chunk: bytes | None) -> None:
+        """Called from the event loop. None marks end of stream."""
+        if self._stopped:
+            return
+        await self._queue.put(chunk)
+
+    def _next_chunk(self) -> bytes | None:
+        fut = asyncio.run_coroutine_threadsafe(self._queue.get(), self._loop)
+        try:
+            return fut.result(timeout=self.READ_TIMEOUT)
+        except Exception:
+            # Timeout or loop shutdown: stop playback instead of hanging
+            return None
+
+    def read(self) -> bytes:
+        if self._stopped or self._eof:
+            return b""
+        while len(self._buf) < FRAME_SIZE:
+            chunk = self._next_chunk()
+            if chunk is None:
+                self._eof = True
+                break
+            self._buf.extend(chunk)
+        if len(self._buf) < FRAME_SIZE:
+            return b""  # tail shorter than one frame is dropped (<20 ms)
+        out = bytes(self._buf[:FRAME_SIZE])
+        del self._buf[:FRAME_SIZE]
+        return out
+
+    def cleanup(self) -> None:
+        # Called by the player thread after playback stops
+        self._stopped = True
