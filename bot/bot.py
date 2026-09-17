@@ -126,3 +126,73 @@ class SpeechBot(commands.Bot):
             if sink is not None:
                 sink.clear()
                 log.info("voice capture cleaned up (disconnected)")
+
+    # ------------------------------------------------------------------
+    # Commands
+    # ------------------------------------------------------------------
+    @commands.command(name="join", aliases=["j"])
+    async def join(self, ctx: commands.Context) -> None:
+        """Join the author's voice channel and start listening."""
+        if not ctx.author.voice or not ctx.author.voice.channel:
+            await ctx.reply("Сначала зайди в голосовой канал.")
+            return
+        channel = ctx.author.voice.channel
+        vc = ctx.guild.voice_client
+        if vc is not None and vc.is_connected():
+            if vc.channel != channel:
+                await vc.move_to(channel)
+        else:
+            if vc is not None:
+                await vc.disconnect(force=True)
+            vc = await channel.connect(reconnect=True, timeout=30.0)
+        self._start_capture(vc)
+        await ctx.reply(f"Подключился к {channel.mention}. Говори!")
+
+    @commands.command(name="leave", aliases=["l"])
+    async def leave(self, ctx: commands.Context) -> None:
+        """Leave the voice channel."""
+        vc = ctx.guild.voice_client
+        if vc is None or not vc.is_connected():
+            await ctx.reply("Я и так не в голосовом канале.")
+            return
+        self._stop_capture(vc)
+        await vc.disconnect(force=True)
+        await ctx.reply("Отключился.")
+
+    @commands.command(name="stop")
+    async def stop(self, ctx: commands.Context) -> None:
+        """Stop current playback immediately."""
+        vc = ctx.guild.voice_client
+        if self.pipeline is not None and vc is not None:
+            self.pipeline.interrupt(vc)
+        await ctx.reply("Остановил." if vc is not None else "Нет активного соединения.")
+
+    @commands.command(name="reset")
+    async def reset(self, ctx: commands.Context) -> None:
+        """Clear conversation history for this channel."""
+        if self.conversations is not None:
+            self.conversations.reset((ctx.guild.id, ctx.channel.id))
+        await ctx.reply("История диалога очищена.")
+
+    @commands.command(name="say")
+    async def say(self, ctx: commands.Context, *, text: str) -> None:
+        """Debug command: synthesize and play arbitrary text."""
+        vc = ctx.guild.voice_client
+        if vc is None or not vc.is_connected():
+            await ctx.reply("Сначала `!join`.")
+            return
+        if self.or_client is None:
+            await ctx.reply("Клиент OpenRouter не готов.")
+            return
+
+        async def text_stream():
+            for ch in text:
+                yield ch
+
+        loop = asyncio.get_running_loop()
+        source = PipelinedAudioSource(loop)
+        session = PlaybackSession(
+            self.settings, self.or_client, self.ffmpeg_path, source, text_stream()
+        )
+        vc.play(source)
+        await session.run()
