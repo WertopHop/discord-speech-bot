@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local audio files (if they appear during debugging)
+*.wav
+*.mp3
+*.pcm
+
+# IDE
+.vscode/
+.idea/
+*.log
+*.err
