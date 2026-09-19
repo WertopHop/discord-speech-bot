@@ -30,7 +30,9 @@ log = logging.getLogger(__name__)
 
 # Chars that end a sentence (incl. CJK and newline)
 _SENTENCE_ENDERS = ".!?\n;…。！？；"
-_MIN_SENTENCE_CHARS = 10
+# Short greetings ("Привет!", "Да.") must go to TTS immediately - waiting for
+# 10+ chars delays the first word by the whole LLM stream
+_MIN_SENTENCE_CHARS = 4
 
 # Playback push timeout: player thread must consume, otherwise it is gone
 _PUSH_TIMEOUT = 10.0
@@ -413,10 +415,21 @@ class SpeechPipeline:
             else:
                 log.info("playback: source finished (EOF or stopped)")
 
-        try:
+        async def _play_when_idle() -> None:
+            # A previous reply may still be draining its player buffer:
+            # wait instead of crashing with "Already playing audio"
+            while vc.is_playing():
+                await asyncio.sleep(0.05)
+            if session.stop_event.is_set():
+                return
             log.info("playback: starting for %s", display_name)
             vc.play(source, after=_play_done)
+
+        try:
+            play_task = asyncio.create_task(_play_when_idle())
+            # LLM/TTS start immediately; audio waits for the player if needed
             played = await session.run()
+            await play_task
         finally:
             self._session = None
 

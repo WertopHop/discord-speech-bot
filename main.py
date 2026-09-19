@@ -46,7 +46,11 @@ def main() -> None:
         sys.exit(1)
 
     bot = SpeechBot(settings)
-    bot.run(settings.discord_token)
+    try:
+        bot.run(settings.discord_token)
+    except KeyboardInterrupt:
+        # pycord's Windows cleanup re-raises Ctrl+C - exit quietly instead
+        print("*** bot stopped")
 
 
 if __name__ == "__main__":
