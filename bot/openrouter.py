@@ -33,6 +33,9 @@ _EXTRA_HEADERS = {
     "X-Title": "discord-speech-bot",
 }
 
+# TTS is per short sentence - a hung provider request must not freeze a reply
+TTS_TOTAL_TIMEOUT = 30.0
+
 
 class OpenRouterClient:
     def __init__(self, settings: Settings) -> None:
@@ -85,7 +88,7 @@ class OpenRouterClient:
     # ------------------------------------------------------------------
     # STT: /audio/transcriptions
     # ------------------------------------------------------------------
-    async def transcribe(self, wav_bytes: bytes) -> str:
+    async def transcribe(self, wav_bytes: bytes, language: str | None = None) -> str:
         """Speech -> text (WAV 16 kHz mono s16le). Empty string if no speech."""
         payload = {
             "model": self._s.stt_model,
@@ -94,13 +97,29 @@ class OpenRouterClient:
                 "format": "wav",
             },
         }
+        if language:
+            payload["language"] = language
         assert self._session is not None
         try:
             async with self._session.post(
-                self._url("/audio/transcriptions"), json=payload
+                self._url("/audio/transcriptions"),
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=self._s.request_timeout),
             ) as resp:
-                await self._raise_for_status(resp, "audio/transcriptions")
-                data: dict[str, Any] = await resp.json(content_type=None)
+                if resp.status == 400 and language:
+                    # endpoint may not accept the language hint - retry without it
+                    log.info("STT: language hint rejected, retrying without it")
+                    payload.pop("language", None)
+                    async with self._session.post(
+                        self._url("/audio/transcriptions"),
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=self._s.request_timeout),
+                    ) as resp2:
+                        await self._raise_for_status(resp2, "audio/transcriptions")
+                        data: dict[str, Any] = await resp2.json(content_type=None)
+                else:
+                    await self._raise_for_status(resp, "audio/transcriptions")
+                    data = await resp.json(content_type=None)
         except asyncio.TimeoutError as exc:
             raise OpenRouterError("STT: timeout request") from exc
         return str(data.get("text") or "").strip()
@@ -159,18 +178,39 @@ class OpenRouterClient:
             "response_format": self._s.tts_format,
         }
         assert self._session is not None
-        resp = await self._session.post(self._url("/audio/speech"), json=payload)
+        # a hung TTS request must not freeze the whole reply
+        resp = await self._session.post(
+            self._url("/audio/speech"),
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=TTS_TOTAL_TIMEOUT),
+        )
         try:
             await self._raise_for_status(resp, "audio/speech")
             content_type = resp.headers.get("Content-Type", "")
             if "application/json" in content_type:
                 body = await resp.text()
                 raise OpenRouterError(f"TTS returned JSON instead of audio: {body[:300]}")
+            received = 0
             async for chunk in resp.content.iter_chunked(8192):
                 if stop_event is not None and stop_event.is_set():
                     break
                 if chunk:
+                    received += len(chunk)
                     yield chunk
+            if received == 0:
+                log.warning(
+                    "TTS: empty response (status=%s, content-type=%s)",
+                    resp.status,
+                    resp.headers.get("Content-Type", "?"),
+                )
+            else:
+                log.info(
+                    "TTS response: %d bytes (content-type=%s)",
+                    received,
+                    resp.headers.get("Content-Type", "?"),
+                )
+        except asyncio.TimeoutError as exc:
+            raise OpenRouterError("TTS: request timed out") from exc
         finally:
             if not resp.closed:
                 resp.close()

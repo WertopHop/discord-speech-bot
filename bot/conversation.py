@@ -10,7 +10,10 @@ from .config import Settings
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a voice assistant in a Discord voice channel. "
-    "Answer briefly and conversationally: 1-3 sentences, no markdown, lists, or emojis. "
+    "Always respond in the SAME language the user just spoke "
+    "(for example, if the user speaks Russian, answer in Russian). "
+    "Keep answers short and conversational: 1-3 sentences, "
+    "no markdown, lists, or emojis. "
     "User messages arrive in the format 'Name: text'."
 )
 

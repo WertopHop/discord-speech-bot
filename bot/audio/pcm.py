@@ -97,8 +97,18 @@ class FFmpegPCMDecoder:
             *self._args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
+
+    async def read_stderr(self) -> bytes:
+        """Collects ffmpeg diagnostics (call after the output stream ended)."""
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return b""
+        try:
+            return await proc.stderr.read()
+        except Exception:  # noqa: BLE001
+            return b""
 
     async def feed(self, data: bytes) -> None:
         proc = self._proc

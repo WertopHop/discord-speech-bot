@@ -56,6 +56,7 @@ class Settings:
     openrouter_base_url: str
 
     stt_model: str
+    stt_lang: str
     llm_model: str
     tts_model: str
     tts_voice: str
@@ -71,6 +72,9 @@ class Settings:
     min_speech_ms: int
     preroll_ms: int
     max_utterance_ms: int
+
+    merge_gap_ms: int
+    merge_max_ms: int
 
     barge_in: bool
     barge_in_min_ms: int
@@ -105,10 +109,11 @@ def get_settings() -> Settings:
         ).rstrip("/"),
         # Models (no built-in defaults: always taken from .env)
         stt_model=_str("STT_MODEL", ""),
+        stt_lang=_str("STT_LANG", ""),
         llm_model=_str("LLM_MODEL", ""),
         tts_model=_str("TTS_MODEL", ""),
         tts_voice=_str("TTS_VOICE", ""),
-        tts_format=_str("TTS_FORMAT", "wav").lower(),
+        tts_format=_str("TTS_FORMAT", "mp3").lower(),
         tts_sample_rate=_int("TTS_SAMPLE_RATE", 24000),
         # LLM
         llm_max_tokens=_int("LLM_MAX_TOKENS", 512),
@@ -123,6 +128,9 @@ def get_settings() -> Settings:
         # Barge-in
         barge_in=_bool("BARGE_IN", True),
         barge_in_min_ms=_int("BARGE_IN_MIN_MS", 350),
+        # Utterance merging (one STT request per speech burst)
+        merge_gap_ms=_int("MERGE_GAP_MS", 1200),
+        merge_max_ms=_int("MERGE_MAX_MS", 12000),
         # Other
         request_timeout=_float("REQUEST_TIMEOUT", 60.0),
     )

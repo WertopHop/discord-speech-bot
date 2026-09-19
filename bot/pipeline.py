@@ -11,13 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import time
+from pathlib import Path
 from typing import AsyncIterator
 
 import discord
+import numpy as np
+from discord.voice import VoiceClient as VoiceClient  # non-deprecated location (pycord 2.7+)
 
-from .audio.pcm import DECODE_CHUNK, FFmpegPCMDecoder, PipelinedAudioSource
+from .audio.pcm import DECODE_CHUNK, FFmpegPCMDecoder, PipelinedAudioSource, mono16k_to_wav
 from .config import Settings
 from .conversation import ConversationStore
+from .markers import heard, say
 from .openrouter import OpenRouterClient
 
 log = logging.getLogger(__name__)
@@ -28,6 +34,22 @@ _MIN_SENTENCE_CHARS = 10
 
 # Playback push timeout: player thread must consume, otherwise it is gone
 _PUSH_TIMEOUT = 10.0
+
+# Whisper noise hallucinations ("*sad music*", "[Music]", "...") that must not reach the LLM
+_NON_SPEECH_RE = re.compile(
+    r"^[\W_]*(music|noise|silence|applause|laughter|crickets|breathing|"
+    r"wind|blowing|beep|static|click|sigh|sad music|loud noise)[\W_]*$"
+)
+
+
+def _dump_diag_wav(wav: bytes) -> None:
+    """Save the exact audio sent to STT (for offline analysis) into diag/."""
+    try:
+        diag = Path(__file__).resolve().parent.parent / "diag"
+        diag.mkdir(exist_ok=True)
+        (diag / "last_utterance.wav").write_bytes(wav)
+    except OSError:
+        pass
 
 
 def clean_for_tts(text: str) -> str:
@@ -157,7 +179,14 @@ class PlaybackSession:
                 if task is None or self.stop_event.is_set():
                     break
                 # FIFO await keeps sentence order intact
-                pcm = await task
+                try:
+                    pcm = await task
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # one failed sentence must not freeze the whole reply
+                    log.exception("sentence TTS failed - skipping it")
+                    continue
                 await self._emit(pcm)
         finally:
             producer.cancel()
@@ -166,6 +195,7 @@ class PlaybackSession:
 
     async def _tts_pcm(self, text: str) -> bytes:
         """TTS one sentence -> full PCM (48 kHz stereo s16le)."""
+        say(text)
         async with self._tts_sem:
             if self.stop_event.is_set():
                 return b""
@@ -175,6 +205,8 @@ class PlaybackSession:
             )
             pcm = bytearray()
             await decoder.start()
+            t_tts = time.monotonic()
+            log.info("TTS: synthesizing %d chars...", len(text))
 
             async def pump() -> None:
                 try:
@@ -194,9 +226,48 @@ class PlaybackSession:
                         break
             finally:
                 pump_task.cancel()
-                await asyncio.gather(pump_task, return_exceptions=True)
+                results = await asyncio.gather(pump_task, return_exceptions=True)
+                try:
+                    ffmpeg_err = await asyncio.wait_for(decoder.read_stderr(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    ffmpeg_err = b""
                 await decoder.close()
-            return b"" if self.stop_event.is_set() else bytes(pcm)
+
+            # Surface TTS/HTTP errors that killed the pump (do not swallow them)
+            for result in results:
+                if isinstance(result, asyncio.CancelledError):
+                    continue
+                if isinstance(result, BaseException):
+                    raise result
+
+            if self.stop_event.is_set():
+                return b""
+            if not pcm:
+                err = ffmpeg_err.decode("utf-8", "replace").strip()
+                log.warning(
+                    "TTS: produced no PCM (%.0fms)%s",
+                    (time.monotonic() - t_tts) * 1000,
+                    f" | ffmpeg: {err[:300]}" if err else "",
+                )
+                return b""
+            log.info(
+                "TTS: done in %.0fms (%.1fs of PCM)",
+                (time.monotonic() - t_tts) * 1000,
+                len(pcm) / (48000 * 2 * 2),
+            )
+            return bytes(pcm)
+
+
+class _PendingMerge:
+    """Speech segments of one speaker accumulated before a single STT request."""
+
+    __slots__ = ("vc", "display_name", "chunks", "timer")
+
+    def __init__(self, vc: VoiceClient, display_name: str) -> None:
+        self.vc = vc
+        self.display_name = display_name
+        self.chunks: list[np.ndarray] = []
+        self.timer: asyncio.Task | None = None
 
 
 class SpeechPipeline:
@@ -213,22 +284,59 @@ class SpeechPipeline:
         self._or = or_client
         self._conv = conversations
         self._ff = ffmpeg_path
-        self._queue: asyncio.Queue[tuple[discord.VoiceClient, int, str, bytes]] = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[VoiceClient, int, str, bytes]] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self._session: PlaybackSession | None = None
         # Increments on barge-in; stale processing aborts itself
         self._generation = 0
+        # Merge consecutive speech fragments into one STT request
+        self._merge_gap = settings.merge_gap_ms / 1000.0
+        self._merge_max_ms = settings.merge_max_ms
+        self._pending: dict[int, _PendingMerge] = {}
 
     def start(self) -> None:
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run(), name="speech-pipeline")
 
     async def submit(
-        self, vc: discord.VoiceClient, user_id: int, display_name: str, wav: bytes
+        self, vc: VoiceClient, user_id: int, display_name: str, pcm_16k: np.ndarray
     ) -> None:
-        await self._queue.put((vc, user_id, display_name, wav))
+        """Accept one captured utterance (16 kHz mono) and merge fragments."""
+        pending = self._pending.get(user_id)
+        if pending is None:
+            pending = self._pending[user_id] = _PendingMerge(vc, display_name)
+        pending.chunks.append(np.asarray(pcm_16k))
+        if pending.timer is not None:
+            pending.timer.cancel()
+        total_ms = sum(len(c) for c in pending.chunks) / 16.0  # 16 samples per ms
+        if total_ms >= self._merge_max_ms:
+            self._flush_pending(user_id)
+        else:
+            pending.timer = asyncio.get_running_loop().create_task(
+                self._flush_pending_later(user_id)
+            )
 
-    def interrupt(self, vc: discord.VoiceClient) -> None:
+    async def _flush_pending_later(self, user_id: int) -> None:
+        await asyncio.sleep(self._merge_gap)
+        self._flush_pending(user_id)
+
+    def _flush_pending(self, user_id: int) -> None:
+        pending = self._pending.pop(user_id, None)
+        if pending is None:
+            return
+        if pending.timer is not None:
+            pending.timer.cancel()
+        pcm = np.concatenate(pending.chunks)
+        wav = mono16k_to_wav(pcm)
+        log.info(
+            "STT request assembled: user=%s, %.1fs of merged audio",
+            user_id,
+            len(pcm) / 16000.0,
+        )
+        _dump_diag_wav(wav)
+        self._queue.put_nowait((pending.vc, user_id, pending.display_name, wav))
+
+    def interrupt(self, vc: VoiceClient) -> None:
         """Barge-in: stop playback and cancel the in-flight reply."""
         self._generation += 1
         if self._session is not None:
@@ -247,19 +355,30 @@ class SpeechPipeline:
                 self._queue.task_done()
 
     async def _process(
-        self, vc: discord.VoiceClient, user_id: int, display_name: str, wav: bytes
+        self, vc: VoiceClient, user_id: int, display_name: str, wav: bytes
     ) -> None:
         if not vc.is_connected():
             return
         gen = self._generation
 
-        text = await self._or.transcribe(wav)
-        if not text:
-            log.info("STT: empty transcript (user=%s)", user_id)
+        # STT
+        log.info("STT: transcribing %.1fs of audio from %s...", len(wav) / 32000.0, display_name)
+        t_stt = time.monotonic()
+        text = await self._or.transcribe(wav, self._s.stt_lang or None)
+        log.info(
+            "STT: done in %.0fms -> %r", (time.monotonic() - t_stt) * 1000, text
+        )
+        heard(text)
+        # Skip empty/meaningless transcripts (e.g. "." or "*sad music*" from noise)
+        if (
+            not text
+            or not any(ch.isalnum() for ch in text)
+            or _NON_SPEECH_RE.match(text.strip().lower())
+        ):
+            log.info("STT: transcript has no meaningful content (user=%s)", user_id)
             return
         if gen != self._generation:
             return  # barge-in happened during STT
-        log.info("STT [%s]: %s", display_name, text)
 
         key = (vc.guild.id, vc.channel.id if vc.channel else 0)
         messages = self._conv.build_messages(key, display_name, text)
@@ -268,26 +387,41 @@ class SpeechPipeline:
         completed = [False]
 
         async def llm_tokens() -> AsyncIterator[str]:
+            t_llm = time.monotonic()
+            log.info("LLM: streaming (%d messages in context)...", len(messages))
             parts: list[str] = []
             async for token in self._or.stream_chat(messages):
                 parts.append(token)
                 yield token
             completed[0] = True
             collected.append("".join(parts))
+            log.info(
+                "LLM: done in %.0fms, reply: %r",
+                (time.monotonic() - t_llm) * 1000,
+                collected[0],
+            )
 
         loop = asyncio.get_running_loop()
         source = PipelinedAudioSource(loop)
         session = PlaybackSession(self._s, self._or, self._ff, source, llm_tokens())
         self._session = session
+
+        def _play_done(exc: Exception | None) -> None:
+            # runs on the player thread; tells us exactly when/why audio ended
+            if exc is not None:
+                log.error("playback ended with player error: %r", exc)
+            else:
+                log.info("playback: source finished (EOF or stopped)")
+
         try:
-            vc.play(source)
+            log.info("playback: starting for %s", display_name)
+            vc.play(source, after=_play_done)
             played = await session.run()
         finally:
             self._session = None
 
         if played and completed[0] and gen == self._generation:
             reply = collected[0] if collected else ""
-            log.info("LLM -> [%s]: %s", display_name, reply)
             self._conv.add_exchange(key, display_name, text, reply)
         elif session.stop_event.is_set():
-            log.info("reply cancelled (barge-in or !stop)")
+            log.info("reply cancelled (barge-in or stop)")
